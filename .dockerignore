@@ -1,0 +1,13 @@
+.venv
+__pycache__
+*.py[cod]
+.env
+.git
+data/postgres
+notebooks
+*.ipynb
+flights_blr_export.csv
+airline_kpi_ranking_30d.csv
+.pytest_cache
+*.md
+!README.md

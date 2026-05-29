@@ -1,0 +1,138 @@
+# BLR Flight Analytics — local stack
+# Usage: docker compose up --build
+
+name: blr-flight-analytics
+
+x-airflow-common: &airflow-common
+  image: apache/airflow:2.8.4-python3.11
+  env_file: .env
+  environment: &airflow-common-env
+    AIRFLOW__CORE__EXECUTOR: LocalExecutor
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://dev:dev@postgres:5432/airflow
+    AIRFLOW__CORE__FERNET_KEY: ${AIRFLOW_FERNET_KEY:-dGVzdGZlcm5ldGtleXRlc3Rmb3Jsb2NhbGRldg==}
+    AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "false"
+    AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+    AIRFLOW__API__AUTH_BACKENDS: airflow.api.auth.backend.basic_auth
+    _PIP_ADDITIONAL_REQUIREMENTS: psycopg2-binary requests python-dotenv sqlalchemy
+    DB_HOST: postgres
+    DB_PORT: "5432"
+    DB_NAME: airline_analytics
+    DB_USER: dev
+    DB_PASSWORD: dev
+    SQL_DIR: /opt/sql
+    PYTHONPATH: /opt/etl
+  volumes:
+    - ./airflow/dags:/opt/airflow/dags
+    - ./etl:/opt/etl
+    - ./sql:/opt/sql:ro
+  user: "50000:0"
+  depends_on:
+    postgres:
+      condition: service_healthy
+
+services:
+  postgres:
+    image: postgres:16
+    container_name: blr-postgres
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_DB: airline_analytics
+      POSTGRES_USER: dev
+      POSTGRES_PASSWORD: dev
+    volumes:
+      - ./data/postgres:/var/lib/postgresql/data
+      - ./scripts/init-db:/docker-entrypoint-initdb.d
+      - ./sql:/docker-entrypoint-initdb.d/sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U dev -d airline_analytics"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    restart: unless-stopped
+
+  ingester:
+    build:
+      context: .
+      dockerfile: ingester/Dockerfile
+    container_name: blr-ingester
+    env_file: .env
+    environment:
+      DB_HOST: postgres
+      DB_PORT: "5432"
+      DB_NAME: airline_analytics
+      DB_USER: dev
+      DB_PASSWORD: dev
+      SQL_DIR: /opt/sql
+    volumes:
+      - ./sql:/opt/sql:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: always
+
+  streamlit:
+    build:
+      context: .
+      dockerfile: app/Dockerfile
+    container_name: blr-streamlit
+    ports:
+      - "8501:8501"
+    env_file: .env
+    environment:
+      DB_HOST: postgres
+      DB_PORT: "5432"
+      DB_NAME: airline_analytics
+      DB_USER: dev
+      DB_PASSWORD: dev
+    volumes:
+      - ./app:/app
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command: >
+      streamlit run app.py
+      --server.address 0.0.0.0
+      --server.port 8501
+      --server.fileWatcherType poll
+      --server.runOnSave true
+    restart: unless-stopped
+
+  airflow-init:
+    <<: *airflow-common
+    container_name: blr-airflow-init
+    environment:
+      <<: *airflow-common-env
+      _AIRFLOW_DB_MIGRATE: "true"
+      _AIRFLOW_WWW_USER_CREATE: "true"
+      _AIRFLOW_WWW_USER_USERNAME: admin
+      _AIRFLOW_WWW_USER_PASSWORD: admin
+    command: version
+    restart: "no"
+
+  airflow-webserver:
+    <<: *airflow-common
+    container_name: blr-airflow-web
+    ports:
+      - "8080:8080"
+    command: webserver
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    restart: unless-stopped
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+
+  airflow-scheduler:
+    <<: *airflow-common
+    container_name: blr-airflow-scheduler
+    command: scheduler
+    restart: unless-stopped
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
